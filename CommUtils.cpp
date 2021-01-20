@@ -2,11 +2,15 @@
 #include "pch.h"
 #include "CommUtils.h"
 #include "stdio.h"
+#include <functional>
+
 const int READ_TIMEOUT = 500;
+const UINT SLEEP_TIME_INTERVAL = 5;
 
 CommUtils::CommUtils()
 {
     bOpenCom = false;
+    hComm = INVALID_HANDLE_VALUE;
 }
 
 CommUtils::~CommUtils()
@@ -29,7 +33,7 @@ bool CommUtils::OpenCom(int port_idx, int rate_idx)
     int error = GetLastError();
 
     if (hComm == INVALID_HANDLE_VALUE)        return false;
-    if (!SetupComm(hComm, 1024, 512))        return false;
+    if (!SetupComm(hComm, 512, 512))        return false;
 
     COMMTIMEOUTS commtimeouts;
     commtimeouts.ReadIntervalTimeout = MAXDWORD;
@@ -66,6 +70,7 @@ bool CommUtils::OpenCom(int port_idx, int rate_idx)
 
     DWORD a = GetFileSize(hComm, NULL);
     bOpenCom = true;
+
     return bOpenCom;
 }
 
@@ -119,10 +124,20 @@ void CommUtils::CloseCom()
     CloseHandle(hComm);
     hComm = NULL;
 
+    StopListen();
+
     CloseHandle(ReadovReady.hEvent);
     CloseHandle(WriteovReady.hEvent);
     ReadovReady.hEvent = NULL;
     WriteovReady.hEvent = NULL;
+}
+
+void CommUtils::StartListen(int interval) {
+    rec_timer.start(interval, std::bind(&CommUtils::ReadData, this)); // 200Hz
+}
+
+void CommUtils::StopListen() {
+    rec_timer.stop();
 }
 
 bool CommUtils::ReadCom(unsigned char* ReceiveData, DWORD& ReceiveLength)
@@ -162,6 +177,7 @@ bool CommUtils::ReadCom(unsigned char* ReceiveData, DWORD& ReceiveLength)
     return true;
 }
 
+
 bool CommUtils::ReadAngle(double* Angle)
 {
     if (!bOpenCom)    return false;
@@ -177,6 +193,8 @@ bool CommUtils::ReadAngle(double* Angle)
         if (cnt > 1e6) {
             return false;
         }
+
+        // angle
         if (ReadFile(hComm, buffer, 1, &ReceiveLength, &ReadovReady) == FALSE)
         {
             if (GetLastError() != ERROR_IO_PENDING)    return false;
@@ -193,7 +211,8 @@ bool CommUtils::ReadAngle(double* Angle)
             cnt++;
             continue;
         }
-        if (ReadFile(hComm, buffer, 6, &ReceiveLength, &ReadovReady) == FALSE)
+
+        if (ReadFile(hComm, buffer, 9, &ReceiveLength, &ReadovReady) == FALSE)
         {
             if (GetLastError() != ERROR_IO_PENDING)    return false;
         }
@@ -217,4 +236,82 @@ bool CommUtils::ReadAngle(double* Angle)
     }
 
     return true;
+}
+
+bool CommUtils::ReadData()
+{
+    if (!bOpenCom)    return false;
+    if (ReadovReady.hEvent == NULL)    return false;
+    unsigned char buffer[1000];
+    DWORD ReceiveLength;
+    COMSTAT ComStat;
+    DWORD dwErrorFlags;
+    ClearCommError(hComm, &dwErrorFlags, &ComStat);
+
+    int offset = 0;
+    if (ReadFile(hComm, buffer, 55, &ReceiveLength, &ReadovReady) == FALSE) {
+        if (GetLastError() != ERROR_IO_PENDING)    return false;
+    }
+    while (ReceiveLength - offset >= 11) {
+        if (!(buffer[offset] == 0x55)) {
+            offset++;
+            continue;
+        }
+        DecodeData(&buffer[offset]);
+        offset += 11;
+    }
+    PurgeComm(hComm, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+
+    return true;
+}
+
+void CommUtils::DecodeData(unsigned char* buffer) {
+    INT16 x, y, z;
+
+    switch (buffer[1]) {
+    case 0x51:
+        x = buffer[3];
+        x = x << 8;
+        x = x + buffer[2];
+        Acc[0] = x / 32768.0 * 16 * 9.8;
+        y = buffer[5];
+        y = y << 8;
+        y = y + buffer[4];
+        Acc[1] = y / 32768.0 * 16 * 9.8;
+        z = buffer[7];
+        z = z << 8;
+        z = z + buffer[6];
+        Acc[2] = z / 32768.0 * 16 * 9.8;
+        break;
+    case 0x53:
+        x = buffer[3];
+        x = x << 8;
+        x = x + buffer[2];
+        Angle[0] = x / 32768.0 * 180;
+        y = buffer[5];
+        y = y << 8;
+        y = y + buffer[4];
+        Angle[1] = y / 32768.0 * 180;
+        z = buffer[7];
+        z = z << 8;
+        z = z + buffer[6];
+        Angle[2] = z / 32768.0 * 180;
+        break;
+    case 0x54:
+        x = buffer[3];
+        x = x << 8;
+        x = x + buffer[2];
+        Mag[0] = x;
+        y = buffer[5];
+        y = y << 8;
+        y = y + buffer[4];
+        Mag[1] = y;
+        z = buffer[7];
+        z = z << 8;
+        z = z + buffer[6];
+        Mag[2] = z;
+        break;
+    default:
+        break;
+    }
 }

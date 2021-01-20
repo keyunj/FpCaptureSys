@@ -12,6 +12,8 @@
 #include "png.h"
 #include <io.h>
 #include <direct.h>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -27,12 +29,15 @@ using namespace std;
 #define  IMAGE_RESULT_HEIGHT  1500
 #define  IMAGE_RESULT_SIZE  IMAGE_RESULT_HEIGHT*IMAGE_RESULT_WIDTH
 
-vector<int> CapFreq = {1, 10, 20, 50};
+vector<int> CapFreq = {1, 10, 20, 50, 100};
+const double ARC_TO_DEG = 57.29577951308238;
+const double DEG_TO_ARC = 0.0174532925199433;
 
 BOOL g_AutoCapture = FALSE;
 BOOL g_bisRoll = FALSE;
 BOOL Setmodeindexfirst = FALSE; //setmode flag
 int g_iQuality = 0;
+const UINT SLEEP_TIME_INTERVAL = 5;
 
 // 用于应用程序“关于”菜单项的 CAboutDlg 对话框
 
@@ -96,6 +101,8 @@ BEGIN_MESSAGE_MAP(CFpCaptureSysDlg, CDialogEx)
 	ON_CBN_SELCHANGE(IDC_COMBO_DEV_GYRO, &CFpCaptureSysDlg::OnCbnSelchangeComboDevGyro)
 	ON_CBN_SELCHANGE(IDC_COMBO_FREQ, &CFpCaptureSysDlg::OnCbnSelchangeComboFreq)
 	ON_BN_CLICKED(IDC_BUTTON_RELEASE, &CFpCaptureSysDlg::OnBnClickedButtonRelease)
+	ON_CBN_SELCHANGE(IDC_COMBO_DEV_GYRO2, &CFpCaptureSysDlg::OnCbnSelchangeComboDevGyro2)
+	ON_BN_CLICKED(IDC_BUTTON_ALIGN, &CFpCaptureSysDlg::OnBnClickedButtonAlign)
 END_MESSAGE_MAP()
 
 
@@ -138,11 +145,13 @@ BOOL CFpCaptureSysDlg::OnInitDialog()
 	// can be edit
 	GetDlgItem(IDC_COMBO_DEV_IMAGE)->EnableWindow(is_ready);
 	GetDlgItem(IDC_COMBO_DEV_GYRO)->EnableWindow(is_ready);
+	GetDlgItem(IDC_COMBO_DEV_GYRO2)->EnableWindow(is_ready);
 	GetDlgItem(IDC_COMBO_RATE_GYRO)->EnableWindow(is_ready);
 	GetDlgItem(IDC_BUTTON_INIT)->EnableWindow(is_ready);
 
 	// not ready
 	GetDlgItem(IDC_BUTTON_DEINIT)->EnableWindow(FALSE);
+	GetDlgItem(IDC_BUTTON_ALIGN)->EnableWindow(FALSE);
 	GetDlgItem(IDC_CHECK_FOG)->EnableWindow(FALSE);
 	GetDlgItem(IDC_COMBO_FREQ)->EnableWindow(FALSE);
 	GetDlgItem(IDC_EDIT_DETTHRESH)->EnableWindow(FALSE);
@@ -155,8 +164,8 @@ BOOL CFpCaptureSysDlg::OnInitDialog()
 	for (int i = 0; i < CapFreq.size(); i++) {
 		((CComboBox*)GetDlgItem(IDC_COMBO_FREQ))->AddString(FormatString(CapFreq[i]));
 	}
-	((CComboBox*)GetDlgItem(IDC_COMBO_FREQ))->SetCurSel(2);
-	cap_freq = CapFreq[2];
+	((CComboBox*)GetDlgItem(IDC_COMBO_FREQ))->SetCurSel(3);
+	cap_freq = CapFreq[3];
 
 	GetDlgItem(IDC_EDIT_DETTHRESH)->SetWindowTextA(FormatString(det_thresh));
 
@@ -209,6 +218,7 @@ bool CFpCaptureSysDlg::RefreshDevList()
 			}
 
 			sz_comm.m_PortNameList.push_back(commName);
+			sz_comm2.m_PortNameList.push_back(commName);
 			nCount++;
 		}
 	} else {
@@ -235,6 +245,13 @@ bool CFpCaptureSysDlg::RefreshDevList()
 	((CComboBox*)GetDlgItem(IDC_COMBO_DEV_GYRO))->SetCurSel(0);
 	cur_dev_gyro_idx = 0;
 
+	((CComboBox*)GetDlgItem(IDC_COMBO_DEV_GYRO2))->ResetContent();
+	for (int i = 0; i < sz_comm2.m_PortNameList.size(); i++) {
+		((CComboBox*)GetDlgItem(IDC_COMBO_DEV_GYRO2))->AddString(sz_comm2.m_PortNameList[i]);
+	}
+	((CComboBox*)GetDlgItem(IDC_COMBO_DEV_GYRO2))->SetCurSel(0);
+	cur_dev_gyro2_idx = 1;
+
 	for (int i = 0; i < sz_comm.m_PortRateList.size(); i++) {
 		((CComboBox*)GetDlgItem(IDC_COMBO_RATE_GYRO))->AddString(FormatString(sz_comm.m_PortRateList[i]));
 	}
@@ -259,7 +276,7 @@ void CFpCaptureSysDlg::Initparam()
 	m_pImagePre = NULL;
 	m_pImageResult = NULL;
 
-	cur_dataDir = GetProgramPath() + "Data";
+	cur_dataDir = GetProgramPath() + "../Data";
 	if (_access(cur_dataDir, 0) == -1) {
 		_mkdir(cur_dataDir);
 	}
@@ -354,11 +371,7 @@ BOOL CFpCaptureSysDlg::InitCallBFuctions() {
 	m_pImageResult = new BYTE[IMAGE_RESULT_SIZE];
 	return TRUE;
 }
-
 void CFpCaptureSysDlg::StorePreData() {
-	double pose_angles[3];
-	sz_comm.ReadAngle(pose_angles);
-
 	if (is_receive == true) {
 		// change status of storing temp data
 		int sum = accumulate(m_pImagePre, m_pImagePre + img_width * img_height, 0, [](int a, BYTE b) {return a + int(b < 255 * 0.6); });
@@ -376,19 +389,43 @@ void CFpCaptureSysDlg::StorePreData() {
 		if (is_store) {
 			// TODO: store image and pose data
 			BYTE* image_array = new BYTE[img_width * img_height];
-			double* pose_array = new double[3];
 			memcpy(image_array, m_pImagePre, img_width * img_height);
-			memcpy(pose_array, pose_angles, sizeof(pose_angles));
 			tmp_image_list.push_back(image_array);
-			tmp_pose_list.push_back(pose_array);
+			tmp_roll_list.push_back(sz_comm.Angle[0]);
+			tmp_pitch_list.push_back(sz_comm.Angle[1]);
+			tmp_yaw_list.push_back(sz_comm.Angle[2]);
+			tmp_accx_list.push_back(sz_comm.Acc[0]);
+			tmp_accy_list.push_back(sz_comm.Acc[1]);
+			tmp_accz_list.push_back(sz_comm.Acc[2]);
+			tmp_magx_list.push_back(sz_comm.Mag[0]);
+			tmp_magy_list.push_back(sz_comm.Mag[1]);
+			tmp_magz_list.push_back(sz_comm.Mag[2]);
+			tmp_roll2_list.push_back(sz_comm2.Angle[0]);
+			tmp_pitch2_list.push_back(sz_comm2.Angle[1]);
+			tmp_yaw2_list.push_back(sz_comm2.Angle[2]);
 		}
 	}
-	GetDlgItem(IDC_EDIT_ROLL)->SetWindowTextA(FormatString(pose_angles[0]));
-	GetDlgItem(IDC_EDIT_PITCH)->SetWindowTextA(FormatString(pose_angles[1]));
-	GetDlgItem(IDC_EDIT_YAW)->SetWindowTextA(FormatString(pose_angles[2]));
+
+	GetDlgItem(IDC_EDIT_ROLL2)->SetWindowTextA(FormatString(sz_comm2.Angle[0]));
+	GetDlgItem(IDC_EDIT_PITCH2)->SetWindowTextA(FormatString(sz_comm2.Angle[1]));
+	GetDlgItem(IDC_EDIT_YAW2)->SetWindowTextA(FormatString(sz_comm2.Angle[2]));
+
+	GetDlgItem(IDC_EDIT_ROLL)->SetWindowTextA(FormatString(sz_comm.Angle[0]));
+	GetDlgItem(IDC_EDIT_PITCH)->SetWindowTextA(FormatString(sz_comm.Angle[1]));
+	GetDlgItem(IDC_EDIT_YAW)->SetWindowTextA(FormatString(sz_comm.Angle[2]));
+
+	GetDlgItem(IDC_EDIT_ACCX)->SetWindowTextA(FormatString(sz_comm.Acc[0]));
+	GetDlgItem(IDC_EDIT_ACCY)->SetWindowTextA(FormatString(sz_comm.Acc[1]));
+	GetDlgItem(IDC_EDIT_ACCZ)->SetWindowTextA(FormatString(sz_comm.Acc[2]));
+
+	GetDlgItem(IDC_EDIT_MAGX)->SetWindowTextA(FormatString(sz_comm.Mag[0]));
+	GetDlgItem(IDC_EDIT_MAGY)->SetWindowTextA(FormatString(sz_comm.Mag[1]));
+	GetDlgItem(IDC_EDIT_MAGZ)->SetWindowTextA(FormatString(sz_comm.Mag[2]));
 }
 
 void CFpCaptureSysDlg::StopCaptureFp(char* chInfo) {
+	sz_comm.StopListen();
+	sz_comm2.StopListen();
 	cap_timer.stop();
 	is_receive = FALSE;
 	is_store = FALSE;
@@ -654,10 +691,21 @@ void CFpCaptureSysDlg::OnBnClickedButtonInit()
 	// TODO: 在此添加控件通知处理程序代码
 
 	// com initialization (gyro)
+	if (cur_dev_gyro_idx == cur_dev_gyro2_idx) {
+		MessageBox("参考陀螺仪选择错误!", "提示");
+		SetInfo("Wrong reference serial port selected", 0);
+		return;
+	}
 	bool is_opencomm = sz_comm.OpenCom(cur_dev_gyro_idx, cur_gyro_rate_idx);
 	double test_angle[3];
 	if (!is_opencomm || !sz_comm.ReadAngle(test_angle)) {
 		MessageBox("无法接受串口数据!", "提示");
+		SetInfo("Can't receive data from serial port", 0);
+		return;
+	}
+	is_opencomm = sz_comm2.OpenCom(cur_dev_gyro2_idx, cur_gyro_rate_idx);
+	if (!is_opencomm || !sz_comm2.ReadAngle(test_angle)) {
+		MessageBox("无法接受参考陀螺仪的串口数据!", "提示");
 		SetInfo("Can't receive data from serial port", 0);
 		return;
 	}
@@ -720,10 +768,12 @@ void CFpCaptureSysDlg::OnBnClickedButtonInit()
 
 	GetDlgItem(IDC_COMBO_DEV_IMAGE)->EnableWindow(FALSE);
 	GetDlgItem(IDC_COMBO_DEV_GYRO)->EnableWindow(FALSE);
+	GetDlgItem(IDC_COMBO_DEV_GYRO2)->EnableWindow(FALSE);
 	GetDlgItem(IDC_COMBO_RATE_GYRO)->EnableWindow(FALSE);
-
 	GetDlgItem(IDC_BUTTON_INIT)->EnableWindow(FALSE);
+
 	GetDlgItem(IDC_BUTTON_DEINIT)->EnableWindow(TRUE);
+	GetDlgItem(IDC_BUTTON_ALIGN)->EnableWindow(TRUE);
 	GetDlgItem(IDC_CHECK_FOG)->EnableWindow(TRUE);
 	GetDlgItem(IDC_COMBO_FREQ)->EnableWindow(TRUE);
 	GetDlgItem(IDC_EDIT_DETTHRESH)->EnableWindow(TRUE);
@@ -851,6 +901,8 @@ void CFpCaptureSysDlg::OnBnClickedButtonStart()
 
 	det_thresh = GetDlgItemInt(IDC_EDIT_DETTHRESH);
 
+	sz_comm.StartListen(7);
+	sz_comm2.StartListen(20);
 	cap_timer.start(1000.0 / cap_freq, std::bind(&CFpCaptureSysDlg::StorePreData, this));
 	is_receive = true;
 	cur_dataFileName = COleDateTime::GetCurrentTime().Format("%Y%m%d%H%M%S");
@@ -940,8 +992,15 @@ void CFpCaptureSysDlg::OnBnClickedButtonSave()
 		return;
 	}
 
-	if (!(tmp_image_list.size() == tmp_pose_list.size())) {
+	if (tmp_image_list.size() < 10) {
+		MessageBox("图像过少，请重新采集!");
+		ReleaseTmpData();
+		return;
+	}
+
+	if (!(tmp_image_list.size() == tmp_yaw_list.size())) {
 		MessageBox("图像与姿态列表数目不一致，请重新采集!");
+		ReleaseTmpData();
 		//OnBnClickedButtonStop();
 		return;
 	}
@@ -957,23 +1016,48 @@ void CFpCaptureSysDlg::OnBnClickedButtonSave()
 	}
 	else {
 		MessageBox("数据已存在，请重新采集！");
+		ReleaseTmpData();
 		return;
 	}
 
 	// save data
-	FILE* fp;
-	if (fopen_s(&fp, strPreDir + "/" + "pose.txt", "wb")) {
+	FILE *fp1, *fp2;
+	if (fopen_s(&fp1, strPreDir + "/" + "pose.txt", "wb")) {
 		MessageBox("无法写入数据");
 		return;
 	}
-	fprintf(fp, "File for finger pose in 3D space, from left to right: id,roll,pitch,yaw. Furthermore, the frequence of capture is %dHz\n", cap_freq);
+	if (fopen_s(&fp2, strPreDir + "/" + "pose_align.txt", "wb")) {
+		MessageBox("无法写入数据");
+		return;
+	}
+	fprintf(fp1, "File for finger pose in 3D space, from left to right: id,roll,pitch,yaw. The frequence of capturing is %dHz\n", cap_freq);
+	fprintf(fp2, "File for aligned finger pose in 3D space, from left to right: id,roll,pitch,yaw. The frequence of capturing is %dHz\n", cap_freq);
+	double mean_roll2 = accumulate(begin(tmp_roll2_list), end(tmp_roll2_list), 0.0) / tmp_roll2_list.size();
+	double mean_pitch2 = accumulate(begin(tmp_pitch2_list), end(tmp_pitch2_list), 0.0) / tmp_pitch2_list.size();
+	double mean_yaw2 = accumulate(begin(tmp_yaw2_list), end(tmp_yaw2_list), 0.0) / tmp_yaw2_list.size();
+	//// 欧拉角 -> 旋转矩阵
+	//Eigen::Vector3d euler_angle2(mean_roll2 * DEG_TO_ARC, mean_pitch2 * DEG_TO_ARC, mean_yaw2 * DEG_TO_ARC);
+	//Eigen::Matrix3d rotation_matrix1, rotation_matrix2;
+	//rotation_matrix2 = Eigen::AngleAxisd(euler_angle2[2], Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(euler_angle2[1], Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(euler_angle2[0], Eigen::Vector3d::UnitX());
+	////rotation_matrix2 = q.toRotationMatrix();
 	for (int i = 0; i < tmp_image_list.size(); i++) {
 		CString strFileName;
 		strFileName.Format("1%05d_0", i); // 留一个扩展位
 		SaveImage(strPreDir, i, strFileName);
-		fprintf(fp, "%s\t%.4f\t%.4f\t%.4f\n", strFileName, tmp_pose_list[i][0], tmp_pose_list[i][1], tmp_pose_list[i][2]);
+
+		fprintf(fp1, "%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n", strFileName, tmp_roll_list[i], tmp_pitch_list[i], tmp_yaw_list[i], tmp_accx_list[i], tmp_accy_list[i], tmp_accz_list[i], tmp_magx_list[i], tmp_magx_list[i], tmp_magx_list[i]);
+
+		//Eigen::Vector3d euler_angle1(tmp_roll_list[i] * DEG_TO_ARC, tmp_pitch_list[i] * DEG_TO_ARC, tmp_yaw_list[i] * DEG_TO_ARC);
+		//rotation_matrix1 = Eigen::AngleAxisd(euler_angle1[2], Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(euler_angle1[1], Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(euler_angle1[0], Eigen::Vector3d::UnitX());
+		////rotation_matrix1 = q.toRotationMatrix();
+		//Eigen::Matrix3d rotation_matrix_align = rotation_matrix2.transpose() * rotation_matrix1;
+		//Eigen::Vector3d euler_angle_align = rotation_matrix_align.eulerAngles(2, 1, 0);
+		//fprintf(fp2, "%s\t%.4f\t%.4f\t%.4f\n", strFileName, euler_angle_align[2] * ARC_TO_DEG, euler_angle_align[1] * ARC_TO_DEG, euler_angle_align[0] * ARC_TO_DEG);
+
+		fprintf(fp2, "%s\t%.4f\t%.4f\t%.4f\n", strFileName, tmp_roll2_list[i] - tmp_roll_list[i], tmp_pitch2_list[i] - tmp_pitch_list[i], tmp_yaw2_list[i] - tmp_yaw_list[i]);
 	}
-	fclose(fp);
+	fclose(fp1);
+	fclose(fp2);
 
 	SetInfo("保存数据'" + strPreDir + "'成功", 1);
 	is_saved = TRUE;
@@ -985,19 +1069,30 @@ void CFpCaptureSysDlg::ReleaseTmpData() {
 			delete[] tmp_image_list[i];
 		}
 		vector<BYTE*>().swap(tmp_image_list);
+
+		vector<double>().swap(tmp_roll_list);
+		vector<double>().swap(tmp_pitch_list);
+		vector<double>().swap(tmp_yaw_list);
+		vector<double>().swap(tmp_roll2_list);
+		vector<double>().swap(tmp_pitch2_list);
+		vector<double>().swap(tmp_yaw2_list);
+		vector<double>().swap(tmp_accx_list);
+		vector<double>().swap(tmp_accy_list);
+		vector<double>().swap(tmp_accz_list);
+		vector<double>().swap(tmp_magx_list);
+		vector<double>().swap(tmp_magy_list);
+		vector<double>().swap(tmp_magz_list);
 	}
-	if (tmp_pose_list.size()) {
-		for (int i = 0; i < tmp_pose_list.size(); i++) {
-			delete[] tmp_pose_list[i];
-		}
-		vector<double*>().swap(tmp_pose_list);
-	}
+
+	is_saved = TRUE;
 }
 
 
 void CFpCaptureSysDlg::OnBnClickedButtonExit()
 {
 	// TODO: 在此添加控件通知处理程序代码
+	sz_comm.StopListen();
+	sz_comm2.StopListen();
 	cap_timer.stop();
 	is_receive = FALSE;
 
@@ -1009,18 +1104,24 @@ void CFpCaptureSysDlg::OnBnClickedButtonExit()
 void CFpCaptureSysDlg::OnBnClickedButtonDeinit()
 {
 	// TODO: 在此添加控件通知处理程序代码
-	if (handle_dev_image_list[cur_dev_image_idx] >= 0)
+	if (handle_dev_image_list.size() > 0 && handle_dev_image_list[cur_dev_image_idx] >= 0)
 		M_Main_DeInitialize(handle_dev_image_list[cur_dev_image_idx]);
 
 	OnBnClickedButtonRelease();
 	if (m_pImagePre) { delete[] m_pImagePre; m_pImagePre = NULL; }
 	if (m_pImageResult) { delete[] m_pImageResult; m_pImageResult = NULL; }
 
+	sz_comm.CloseCom();
+	sz_comm2.CloseCom();
+
 	GetDlgItem(IDC_COMBO_DEV_IMAGE)->EnableWindow(TRUE);
 	GetDlgItem(IDC_COMBO_DEV_GYRO)->EnableWindow(TRUE);
+	GetDlgItem(IDC_COMBO_DEV_GYRO2)->EnableWindow(TRUE);
 	GetDlgItem(IDC_COMBO_RATE_GYRO)->EnableWindow(TRUE);
+	GetDlgItem(IDC_BUTTON_INIT)->EnableWindow(TRUE);
 
 	GetDlgItem(IDC_BUTTON_DEINIT)->EnableWindow(FALSE);
+	GetDlgItem(IDC_BUTTON_ALIGN)->EnableWindow(FALSE);
 	GetDlgItem(IDC_CHECK_FOG)->EnableWindow(FALSE);
 	GetDlgItem(IDC_COMBO_FREQ)->EnableWindow(FALSE);
 	GetDlgItem(IDC_EDIT_DETTHRESH)->EnableWindow(FALSE);
@@ -1059,6 +1160,28 @@ void CFpCaptureSysDlg::OnBnClickedButtonRelease()
 		OnBnClickedButtonSave();
 	}
 
-	ReleaseTmpData();
 	SetInfo("清除缓存", 1);
+}
+
+
+void CFpCaptureSysDlg::OnCbnSelchangeComboDevGyro2()
+{
+	// TODO: 在此添加控件通知处理程序代码
+	cur_dev_gyro2_idx = ((CComboBox*)GetDlgItem(IDC_COMBO_DEV_GYRO2))->GetCurSel();
+}
+
+
+void CFpCaptureSysDlg::OnBnClickedButtonAlign()
+{
+	// TODO: 在此添加控件通知处理程序代码
+	double pose_angles[3];
+	double pose2_angles[3];
+	sz_comm.ReadAngle(pose_angles);
+	sz_comm2.ReadAngle(pose2_angles);
+	roll = pose_angles[0];
+	pitch = pose_angles[1];
+	yaw = pose_angles[2];
+	roll2 = pose2_angles[0];
+	pitch2 = pose2_angles[1];
+	yaw2 = pose2_angles[2];
 }

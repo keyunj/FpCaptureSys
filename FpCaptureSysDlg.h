@@ -27,12 +27,13 @@ public:
 	virtual void DoDataExchange(CDataExchange* pDX);	// DDX/DDV 支持
 
 	// my variables
-	CString cur_dataDir = "Data";
+	CString cur_dataDir = "../Data";
 	CString cur_dataFileName;
 
 	BYTE* m_pImagePre, * m_pImageResult;
 	int cur_dev_image_idx = 0;
 	int cur_dev_gyro_idx = 0;
+	int cur_dev_gyro2_idx = 0;
 	int cur_gyro_rate_idx = 2;
 	char m_chBmpBuf[2048];
 	int cap_freq = 20;
@@ -48,13 +49,31 @@ public:
 
 	Timer cap_timer;
 	CommUtils sz_comm;
+	CommUtils sz_comm2;
+	double roll = 0;
+	double pitch = 0;
+	double yaw = 0;
+	double roll2 = 0;
+	double pitch2 = 0;
+	double yaw2 = 0;
 	
 	vector<int> handle_dev_image_list;
 
 	// temp data (to be saved)
 
 	vector<BYTE*> tmp_image_list;
-	vector<double*> tmp_pose_list;
+	vector<double> tmp_yaw_list;
+	vector<double> tmp_pitch_list;
+	vector<double> tmp_roll_list;
+	vector<double> tmp_yaw2_list;
+	vector<double> tmp_pitch2_list;
+	vector<double> tmp_roll2_list;
+	vector<double> tmp_accx_list;
+	vector<double> tmp_accy_list;
+	vector<double> tmp_accz_list;
+	vector<double> tmp_magx_list;
+	vector<double> tmp_magy_list;
+	vector<double> tmp_magz_list;
 
 	typedef struct StateTipTxt {
 		CString cTipsStr[10];
@@ -109,4 +128,6 @@ public:
 	afx_msg void OnCbnSelchangeComboDevGyro();
 	afx_msg void OnCbnSelchangeComboFreq();
 	afx_msg void OnBnClickedButtonRelease();
+	afx_msg void OnCbnSelchangeComboDevGyro2();
+	afx_msg void OnBnClickedButtonAlign();
 };
